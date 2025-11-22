@@ -6,12 +6,10 @@ import json
 import ast   #ast = abstract syntac trees. used to clean up \n, and convert code to tree like structure 
 import pprint
 from datetime import datetime
+import re
+from rapidfuzz import fuzz
 
 
-# 1. Get HTML content output from the scraper
-# 2. Pass it into an LLM call for entity extraction
-# 3. Pass that output into another LLM call for relationship extraction
-# 4. save each triplet to disk based on model for gemma2.txt, rather based on 
 # 5. Review and evaluate each result manually
 # 6. Document which combinations provided the best performance for each stage. log name, prompt, input, output, notes on quality or accuracy
 
@@ -234,43 +232,91 @@ def extract_relationships(entities, model="gemma2:2b"):
     return triplets
 
 def evaluate_triplets(relationships, model_name, prompt_version):
-    """
-    Generate evaluation template for manual review
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    eval_template = f"""
-    ### Run: {model_name} - {timestamp}
-    **Model:** {model_name}
-    **Prompt Version:** {prompt_version}
-    **Total Triplets:** {len(relationships)}
-
-    #### Triplets for Evaluation:
-
-    """
-    
-    for i, triplet in enumerate(relationships, 1):
-        subject, predicate, obj = triplet
-        eval_template += f"""
-        {i}. `{triplet}`
-        - Entity Accuracy: __/5
-        - Relationship Accuracy: __/5
-        - Type Consistency: __/5
-        - Overall Quality: __/5
-        - **Notes:** 
         """
-            
-        eval_template += """
-        **Overall Run Score:** __/5
-        **Best Triples:** 
-        **Worst Triples:** 
-        **Key Issues:** 
-        **Recommendations:** 
-
-        ---
+        Generate evaluation template for manual review
         """
-    
-    return eval_template
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        eval_template = f"""
+        ### Run: {model_name} - {timestamp}
+        **Model:** {model_name}
+        **Prompt Version:** {prompt_version}
+        **Total Triplets:** {len(relationships)}
+
+        #### Triplets for Evaluation:
+
+        """
+        for i, triplet in enumerate(relationships, 1):
+
+            subject, predicate, obj = triplet
+            eval_template += f"""
+            {i}. `{triplet}`
+            - Entity Accuracy: __/5
+            - Relationship Accuracy: __/5
+            - Type Consistency: __/5
+            - Overall Quality: __/5
+            - **Notes:** 
+            """
+                
+            eval_template += """
+            **Overall Run Score:** __/5
+            **Best Triples:** 
+            **Worst Triples:** 
+            **Key Issues:** 
+            **Recommendations:** 
+
+            ---
+            """
+        
+        return eval_template
+
+
+def normalize_entity(e: str):
+    """Normalize strings for comparison."""
+    e = e.lower().strip()
+    e = re.sub(r'[^a-z0-9\s]', '', e)
+    e = re.sub(r'\s+', ' ', e)
+    return e
+
+
+def dedupe_entities(entity_dict: dict, threshold: float = 88.0) -> dict:
+    """
+    Deduplicate LLM-extracted entities using normalization + fuzzy similarity.
+    Input format = {"entities": [...]}
+    Output format = {"entities": [...]}
+    """
+    if "entities" not in entity_dict:
+        return entity_dict
+
+    entities = entity_dict["entities"]
+    if not entities:
+        return entity_dict
+
+    normalized_map = {}  # normalized → original list
+    final_entities = []
+
+    for e in entities:
+        norm = normalize_entity(e)
+
+        matched = None
+        for kept in normalized_map:
+            score = fuzz.token_sort_ratio(norm, kept)
+            if score >= threshold:
+                matched = kept
+                break
+
+        if matched:
+            normalized_map[matched].append(e)
+        else:
+            normalized_map[norm] = [e]
+
+    # pick best representative for each group
+    for norm_key, group in normalized_map.items():
+        # choose longest entity (usually most descriptive)
+        best = max(group, key=len)
+        final_entities.append(best)
+
+    return {"entities": final_entities}
 
 if __name__ == "__main__":
     # Test URL
@@ -300,6 +346,14 @@ if __name__ == "__main__":
     
     # Extract entities using LLM
     entities = extract_entities(scraped_data, model=model_name)
+
+
+    print("Extracted Entities:")
+    print(json.dumps(entities, indent=2))
+
+
+    #Remove duplicate entities
+    entities = dedupe_entities(entities)
     
     # Print entities
     print("Extracted Entities:")
@@ -320,7 +374,7 @@ if __name__ == "__main__":
     print("\n=== STEP 3: RELATIONSHIP EXTRACTION ===\n")
 
 
-    modelArr = ["gemma2:2b","llama3.2:1b", "gemma3:1b", "phi3:mini"]
+    modelArr = ["gemma2:2b","llama3.2:1b", "gemma3:1b", "phi3:mini", "deepseek-r1:latest"]
 
     for modelName in modelArr:
         relationships = extract_relationships(entities, model=modelName)
@@ -336,7 +390,7 @@ if __name__ == "__main__":
         with open(f"evaluation_log_{modelName.replace(':', '_')}.txt", "w") as f:
             f.write(eval_log)
 
-        print(f"\nEvaluation template saved to: evaluation_log_{modelName.replace(':', '_')}.txt")
+        print(f"\nRelationship Evaluation for {modelName} saved to: evaluation_log_{modelName.replace(':', '_')}.txt")
     
 
 
